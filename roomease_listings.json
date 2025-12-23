@@ -1,0 +1,50 @@
+[
+  {
+    "id": "prop_001",
+    "title": "Modern Private Room Near UNSW",
+    "description": "Comfortable private room in Kensington, 5 minutes walk from UNSW. Perfect for students. Fully furnished with WiFi, air conditioning, and shared kitchen access.",
+    "type": "Private Room",
+    "price": 280,
+    "location": {
+      "address": "123 Anzac Parade",
+      "suburb": "Kensington",
+      "city": "Sydney",
+      "state": "NSW",
+      "postcode": "2033",
+      "country": "Australia"
+    },
+    "nearestUniversity": {
+      "name": "UNSW Sydney",
+      "distance": "800m"
+    },
+    "features": {
+      "bedrooms": 1,
+      "bathrooms": 1,
+      "furnished": true,
+      "wifi": true,
+      "parking": true,
+      "petsAllowed": false
+    },
+    "amenities": [
+      "WiFi",
+      "Air Conditioning",
+      "Washing Machine",
+      "Kitchen Access",
+      "Study Desk",
+      "Wardrobe"
+    ],
+    "images": [
+      "https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?w=800"
+    ],
+    "availableFrom": "2025-02-01",
+    "minimumStay": "6 months",
+    "verified": true,
+    "rating": 4.8,
+    "reviewsCount": 24,
+    "owner": {
+      "name": "Sarah Johnson",
+      "phone": "+61 400 123 456",
+      "email": "sarah.j@example.com"
+    }
+  }
+]
