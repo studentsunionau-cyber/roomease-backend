@@ -1,10 +1,9 @@
-// RoomEase Backend API Server - Production Ready
+// RoomEase Backend API Server - WITH POSTGRESQL
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const fs = require('fs');
-const path = require('path');
+const { Pool } = require('pg');
 
 const app = express();
 
@@ -12,9 +11,37 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://roomease-au.netlify.app';
+const DATABASE_URL = process.env.DATABASE_URL;
 
 console.log('🏠 RoomEase API Starting...');
 console.log('Environment:', process.env.NODE_ENV || 'development');
+
+// PostgreSQL Connection Pool
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
+// Test database connection
+pool.query('SELECT NOW()', (err, res) => {
+  if (err) {
+    console.error('❌ Database connection error:', err);
+  } else {
+    console.log('✅ Database connected successfully');
+    console.log('📅 Server time:', res.rows[0].now);
+  }
+});
+
+// Get property count
+pool.query('SELECT COUNT(*) as count FROM properties', (err, res) => {
+  if (err) {
+    console.log('⚠️ Could not count properties (table may not exist yet)');
+  } else {
+    console.log('📊 Properties in database:', res.rows[0].count);
+  }
+});
 
 // CORS Configuration
 app.use(cors({
@@ -35,35 +62,6 @@ app.use((req, res, next) => {
 // Body Parsing
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// In-memory database
-const db = {
-  users: [],
-  properties: [],
-  bookings: [],
-  reviews: [],
-  messages: []
-};
-
-// Load property data
-function loadRealData() {
-  const listingsPath = path.join(__dirname, 'roomease_listings.json');
-  
-  try {
-    if (fs.existsSync(listingsPath)) {
-      const data = fs.readFileSync(listingsPath, 'utf8');
-      const listings = JSON.parse(data);
-      db.properties = listings;
-      console.log(`✅ Loaded ${db.properties.length} properties`);
-    } else {
-      console.log('⚠️ No listings file found');
-    }
-  } catch (error) {
-    console.error('❌ Error loading data:', error.message);
-  }
-}
-
-loadRealData();
 
 // JWT Middleware
 const authenticateToken = (req, res, next) => {
@@ -88,14 +86,22 @@ const authenticateToken = (req, res, next) => {
 // ============================================
 
 // Health Check
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    properties: db.properties.length,
-    uptime: process.uptime()
-  });
+app.get('/health', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT COUNT(*) as count FROM properties');
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      database: 'connected',
+      properties: parseInt(result.rows[0].count),
+      uptime: process.uptime()
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Database connection failed'
+    });
+  }
 });
 
 // Root
@@ -103,6 +109,7 @@ app.get('/', (req, res) => {
   res.json({
     message: '🏠 Welcome to RoomEase API',
     version: '1.0.0',
+    database: 'PostgreSQL',
     endpoints: {
       health: '/health',
       properties: '/api/properties',
@@ -113,65 +120,134 @@ app.get('/', (req, res) => {
 });
 
 // Statistics
-app.get('/api/stats', (req, res) => {
-  const cities = [...new Set(db.properties.map(p => p.location.city))];
-  const avgPrice = Math.round(
-    db.properties.reduce((sum, p) => sum + p.price, 0) / db.properties.length
-  );
+app.get('/api/stats', async (req, res) => {
+  try {
+    const totalResult = await pool.query('SELECT COUNT(*) as count FROM properties');
+    const citiesResult = await pool.query('SELECT DISTINCT city FROM properties');
+    const avgPriceResult = await pool.query('SELECT AVG(price) as avg FROM properties');
+    const typeStats = await pool.query(`
+      SELECT type, COUNT(*) as count 
+      FROM properties 
+      GROUP BY type
+    `);
 
-  res.json({
-    totalProperties: db.properties.length,
-    cities: cities.length,
-    citiesList: cities,
-    averagePrice: avgPrice
-  });
+    const stats = {};
+    typeStats.rows.forEach(row => {
+      stats[row.type.toLowerCase().replace(' ', '_')] = parseInt(row.count);
+    });
+
+    res.json({
+      totalProperties: parseInt(totalResult.rows[0].count),
+      cities: citiesResult.rows.length,
+      citiesList: citiesResult.rows.map(r => r.city),
+      averagePrice: Math.round(parseFloat(avgPriceResult.rows[0].avg)),
+      propertyTypes: stats
+    });
+  } catch (error) {
+    console.error('Stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch statistics' });
+  }
 });
 
 // Get All Properties
-app.get('/api/properties', (req, res) => {
-  let properties = [...db.properties];
+app.get('/api/properties', async (req, res) => {
+  try {
+    let query = 'SELECT * FROM properties WHERE 1=1';
+    const params = [];
+    let paramCount = 1;
 
-  if (req.query.city) {
-    properties = properties.filter(
-      p => p.location.city.toLowerCase() === req.query.city.toLowerCase()
-    );
+    // Filter by city
+    if (req.query.city) {
+      query += ` AND LOWER(city) = LOWER($${paramCount})`;
+      params.push(req.query.city);
+      paramCount++;
+    }
+
+    // Filter by type
+    if (req.query.type) {
+      query += ` AND LOWER(type) = LOWER($${paramCount})`;
+      params.push(req.query.type);
+      paramCount++;
+    }
+
+    // Filter by price range
+    if (req.query.minPrice) {
+      query += ` AND price >= $${paramCount}`;
+      params.push(parseInt(req.query.minPrice));
+      paramCount++;
+    }
+    if (req.query.maxPrice) {
+      query += ` AND price <= $${paramCount}`;
+      params.push(parseInt(req.query.maxPrice));
+      paramCount++;
+    }
+
+    // Sorting
+    if (req.query.sort === 'price_asc') {
+      query += ' ORDER BY price ASC';
+    } else if (req.query.sort === 'price_desc') {
+      query += ' ORDER BY price DESC';
+    } else if (req.query.sort === 'rating') {
+      query += ' ORDER BY rating DESC NULLS LAST';
+    } else {
+      query += ' ORDER BY created_at DESC';
+    }
+
+    // Pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
+    params.push(limit, offset);
+
+    const result = await pool.query(query, params);
+
+    // Get total count
+    let countQuery = 'SELECT COUNT(*) as total FROM properties WHERE 1=1';
+    const countParams = [];
+    let countParamNum = 1;
+
+    if (req.query.city) {
+      countQuery += ` AND LOWER(city) = LOWER($${countParamNum})`;
+      countParams.push(req.query.city);
+      countParamNum++;
+    }
+    if (req.query.type) {
+      countQuery += ` AND LOWER(type) = LOWER($${countParamNum})`;
+      countParams.push(req.query.type);
+    }
+    
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].total);
+
+    res.json({
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      properties: result.rows
+    });
+  } catch (error) {
+    console.error('Properties error:', error);
+    res.status(500).json({ error: 'Failed to fetch properties' });
   }
-
-  if (req.query.type) {
-    properties = properties.filter(
-      p => p.type.toLowerCase() === req.query.type.toLowerCase()
-    );
-  }
-
-  if (req.query.minPrice) {
-    properties = properties.filter(p => p.price >= parseInt(req.query.minPrice));
-  }
-  if (req.query.maxPrice) {
-    properties = properties.filter(p => p.price <= parseInt(req.query.maxPrice));
-  }
-
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 20;
-  const startIndex = (page - 1) * limit;
-  const endIndex = startIndex + limit;
-
-  res.json({
-    total: properties.length,
-    page,
-    limit,
-    properties: properties.slice(startIndex, endIndex)
-  });
 });
 
 // Get Single Property
-app.get('/api/properties/:id', (req, res) => {
-  const property = db.properties.find(p => p.id === req.params.id);
-  
-  if (!property) {
-    return res.status(404).json({ error: 'Property not found' });
-  }
+app.get('/api/properties/:id', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM properties WHERE id = $1', [req.params.id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Property not found' });
+    }
 
-  res.json(property);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Property fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch property' });
+  }
 });
 
 // User Registration
@@ -183,25 +259,25 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    if (db.users.find(u => u.email === email)) {
+    // Check if user exists
+    const existingUser = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
       return res.status(400).json({ error: 'User already exists' });
     }
 
+    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const user = {
-      id: `user_${Date.now()}`,
-      email,
-      password: hashedPassword,
-      name,
-      role: role || 'student',
-      createdAt: new Date().toISOString()
-    };
+    // Create user
+    const userId = `user_${Date.now()}`;
+    await pool.query(
+      'INSERT INTO users (id, email, password, name, role) VALUES ($1, $2, $3, $4, $5)',
+      [userId, email, hashedPassword, name, role || 'student']
+    );
 
-    db.users.push(user);
-
+    // Generate token
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      { id: userId, email, role: role || 'student' },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -209,9 +285,10 @@ app.post('/api/auth/register', async (req, res) => {
     res.status(201).json({
       message: 'User registered successfully',
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role }
+      user: { id: userId, email, name, role: role || 'student' }
     });
   } catch (error) {
+    console.error('Registration error:', error);
     res.status(500).json({ error: 'Registration failed' });
   }
 });
@@ -225,16 +302,21 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and password required' });
     }
 
-    const user = db.users.find(u => u.email === email);
-    if (!user) {
+    // Find user
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (result.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    const user = result.rows[0];
+
+    // Check password
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // Generate token
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       JWT_SECRET,
@@ -247,35 +329,53 @@ app.post('/api/auth/login', async (req, res) => {
       user: { id: user.id, email: user.email, name: user.name, role: user.role }
     });
   } catch (error) {
+    console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
   }
 });
 
 // Create Booking
-app.post('/api/bookings', authenticateToken, (req, res) => {
-  const { propertyId, checkIn, checkOut } = req.body;
+app.post('/api/bookings', authenticateToken, async (req, res) => {
+  try {
+    const { propertyId, checkIn, checkOut } = req.body;
 
-  const property = db.properties.find(p => p.id === propertyId);
-  if (!property) {
-    return res.status(404).json({ error: 'Property not found' });
+    // Verify property exists
+    const propertyResult = await pool.query('SELECT id FROM properties WHERE id = $1', [propertyId]);
+    if (propertyResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Property not found' });
+    }
+
+    // Create booking
+    const bookingId = `booking_${Date.now()}`;
+    await pool.query(
+      'INSERT INTO bookings (id, property_id, user_id, check_in, check_out, status) VALUES ($1, $2, $3, $4, $5, $6)',
+      [bookingId, propertyId, req.user.id, checkIn, checkOut, 'pending']
+    );
+
+    const booking = await pool.query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
+
+    res.status(201).json({
+      message: 'Booking created successfully',
+      booking: booking.rows[0]
+    });
+  } catch (error) {
+    console.error('Booking error:', error);
+    res.status(500).json({ error: 'Failed to create booking' });
   }
+});
 
-  const booking = {
-    id: `booking_${Date.now()}`,
-    propertyId,
-    userId: req.user.id,
-    checkIn,
-    checkOut,
-    status: 'pending',
-    createdAt: new Date().toISOString()
-  };
-
-  db.bookings.push(booking);
-
-  res.status(201).json({
-    message: 'Booking created successfully',
-    booking
-  });
+// Get User Bookings
+app.get('/api/bookings', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM bookings WHERE user_id = $1 ORDER BY created_at DESC',
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Fetch bookings error:', error);
+    res.status(500).json({ error: 'Failed to fetch bookings' });
+  }
 });
 
 // 404 Handler
@@ -286,8 +386,25 @@ app.use((req, res) => {
   });
 });
 
+// Error Handler
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+  });
+});
+
 // Start Server
 app.listen(PORT, () => {
   console.log('🚀 RoomEase API running on port', PORT);
-  console.log('📊 Properties loaded:', db.properties.length);
+});
+
+// Graceful Shutdown
+process.on('SIGTERM', () => {
+  console.log('👋 SIGTERM received, closing database pool...');
+  pool.end(() => {
+    console.log('Database pool closed');
+    process.exit(0);
+  });
 });
